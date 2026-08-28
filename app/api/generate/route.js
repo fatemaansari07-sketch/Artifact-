@@ -1,4 +1,4 @@
-import { callWithFallback, extractJSON } from "../../../lib/llm";
+import { callJSONWithFallback, callWithFallback, extractJSON } from "../../../lib/llm";
 
 export const runtime = "nodejs";
 
@@ -12,10 +12,22 @@ If they're asking a question, reporting a bug, or discussing something (not aski
 If they want you to build or change something:
   {
     "type": "build",
+    "plan": ["short bullet of what you're building/changing", "another bullet", "..."],
     "runtime": "browser" or "node",
     "files": { "/App.js": "...", "/components/Foo.js": "..." },
     "dependencies": { "package-name": "version" },
     "explanation": "One short friendly sentence in Hinglish describing what you built."
+  }
+"plan" is 2-4 short bullets (Hinglish OK) of what you're about to build/change — written BEFORE you reason through the files, like you're telling the person your approach first.
+
+If this is an automatic error-fix request (the message will say so explicitly):
+  {
+    "type": "build",
+    "plan": ["Error ki wajah: ...", "Fix: ..."],
+    "runtime": "browser" or "node",
+    "files": { only the files you changed to fix it },
+    "dependencies": {},
+    "explanation": "One short sentence in Hinglish about what was wrong and what you fixed."
   }
 
 Rules for "build":
@@ -25,7 +37,8 @@ Rules for "build":
 - Prefer plain inline styles over Tailwind unless asked (Sandpack's react template has no Tailwind).
 - Keep dependencies minimal, only from npm's public registry.
 - If given current files, modify them — keep unrelated files intact, only include changed/new files.
-- Match the existing runtime unless asked to change it.`;
+- Match the existing runtime unless asked to change it.
+- SCROLLING: never set a fixed "height: 100vh" with "overflow: hidden" on the outer container if content can grow (lists, long text, forms). Use "minHeight: 100vh" on the outer wrapper so the page scrolls naturally. If you build a fixed-height layout (header/footer), the scrollable middle section must have "overflowY: 'auto'" with an explicit height/flex.`;
 
 const REVIEW_SYSTEM_PROMPT = `You are a meticulous code reviewer for a Sandpack "react" template app. Check for: syntax errors, missing imports, undefined variables/components, mismatched JSX tags, obviously broken logic.
 
@@ -51,10 +64,11 @@ export async function POST(req) {
       });
     }
 
-    const { text: raw, providerUsed } = await callWithFallback(BUILD_SYSTEM_PROMPT, userTurns, { maxTokens: 4000 });
-    let parsed;
+    let parsed, providerUsed;
     try {
-      parsed = extractJSON(raw);
+      const result = await callJSONWithFallback(BUILD_SYSTEM_PROMPT, userTurns, { maxTokens: 4000 });
+      parsed = result.parsed;
+      providerUsed = result.providerUsed;
     } catch (e) {
       return Response.json({ error: `Model response wasn't valid JSON: ${e.message}` }, { status: 502 });
     }
@@ -70,12 +84,11 @@ export async function POST(req) {
     let selfCheckNote = null;
     try {
       const mergedFiles = { ...currentFiles, ...parsed.files };
-      const { text: reviewRaw } = await callWithFallback(
+      const { parsed: review } = await callJSONWithFallback(
         REVIEW_SYSTEM_PROMPT,
         [{ role: "user", content: JSON.stringify(mergedFiles).slice(0, 12000) }],
         { maxTokens: 2000 }
       );
-      const review = extractJSON(reviewRaw);
       selfCheckNote = review.note || null;
       if (review.fixedFiles && typeof review.fixedFiles === "object") {
         parsed.files = { ...parsed.files, ...review.fixedFiles };
@@ -86,6 +99,7 @@ export async function POST(req) {
 
     return Response.json({
       type: "build",
+      plan: Array.isArray(parsed.plan) ? parsed.plan : [],
       files: parsed.files,
       dependencies: parsed.dependencies || {},
       explanation: parsed.explanation || "Ban gaya.",
